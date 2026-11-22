@@ -11,8 +11,14 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <csignal>
+#include <atomic>
+#include <chrono>
 
 static ec::Point negp(const ec::Point& p) { return ec::Point{p.x, ec::fe_neg(p.y), p.inf}; }
+
+static std::atomic<bool> g_stop{false};
+static void on_sigint(int) { g_stop.store(true); }
 
 static void usage() {
     printf(
@@ -26,7 +32,11 @@ static void usage() {
 "  --range N       override search range in bits (default: puzzle interval [2^(N-1),2^N))\n"
 "  --threads N     worker threads (default 4)\n"
 "  --seed N        RNG seed\n"
-"  --no-sym        disable +-P symmetry (use plain kangaroo)\n\n"
+"  --no-sym        disable +-P symmetry (use plain kangaroo)\n"
+"  --checkpoint F  save DP-table progress to F periodically (atomic, sha256)\n"
+"  --resume F      resume a kangaroo run from checkpoint F\n"
+"  --checkpoint-interval S   seconds between snapshots (default 30)\n"
+"  (Ctrl+C writes a final snapshot and exits; checkpointing needs symmetry mode)\n\n"
 "Brute engine (with --address):\n"
 "  --engine NAME   exlottery (default, volante) | kh71 (base key hunter)\n"
 "  --first-allow .. --allow ..   (exlottery volante; ignored by kh71)\n"
@@ -46,6 +56,7 @@ int main(int argc, char** argv) {
     std::string kh71_bin = "/root/excalibur369/build/kh71";
     std::string engine = "exlottery", brute_args;
     std::string first_allow, allow, mode, found_file;
+    std::string ckpt_path, resume_path; int ckpt_interval = 30;
 
     auto need = [&](int& i) -> std::string {
         if (i + 1 >= argc) { fprintf(stderr, "missing value after %s\n", argv[i]); exit(2); }
@@ -61,6 +72,9 @@ int main(int argc, char** argv) {
         else if (a == "--threads") threads = atoi(need(i).c_str());
         else if (a == "--seed") seed = strtoull(need(i).c_str(), nullptr, 0);
         else if (a == "--no-sym") sym = false;
+        else if (a == "--checkpoint") ckpt_path = need(i);
+        else if (a == "--resume") resume_path = need(i);
+        else if (a == "--checkpoint-interval") ckpt_interval = atoi(need(i).c_str());
         else if (a == "--dry-run") dry = true;
         else if (a == "--first-allow") first_allow = need(i);
         else if (a == "--allow") allow = need(i);
@@ -107,12 +121,39 @@ int main(int argc, char** argv) {
             if (reff > 64) printf("  <-- inviavel nesta CPU; feito pra CPU mais rapida / futura GPU (Ctrl-C a qualquer hora)");
             printf("\n");
         }
+        // Phase 5: checkpoint/resume (symmetry mode only)
+        kang::CkptOpts ck;
+        std::string cpath = !resume_path.empty() ? resume_path : ckpt_path;
+        kang::CkptOpts* ckp = nullptr;
+        if (!cpath.empty()) {
+            if (!sym) {
+                fprintf(stderr, "  note: checkpoint/resume needs symmetry mode; ignoring (remove --no-sym)\n");
+            } else {
+                ck.path = cpath;
+                ck.interval_sec = ckpt_interval;
+                ck.resume = !resume_path.empty();
+                ck.session_salt = (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count();
+                ck.stop = &g_stop;
+                ckp = &ck;
+                signal(SIGINT, on_sigint);
+                printf("  checkpoint: %s%s (every %ds)\n", ck.path.c_str(),
+                       ck.resume ? " [resuming]" : "", ck.interval_sec);
+            }
+        }
         if (dry) { printf("  (dry-run) would solve now.\n"); return 0; }
 
         ec::Point Pshift = sc::is_zero(lo) ? P : ec::point_add(P, negp(ec::mul_g(lo)));
-        kang::Result r = sym ? kang::solve_sym(Pshift, reff, seed, threads)
+        kang::Result r = sym ? kang::solve_sym(Pshift, reff, seed, threads, ckp)
                              : kang::solve(Pshift, reff, seed, threads);
+        if (ckp && ck.resume && ck.loaded_dps)
+            printf("  resumed %llu distinguished points from checkpoint\n", (unsigned long long)ck.loaded_dps);
         if (!r.found) {
+            if (ckp && g_stop.load()) {
+                printf("  PAUSED — progress saved to %s (%llu DPs, jumps=%llu). Resume with: --resume %s\n",
+                       ck.path.c_str(), (unsigned long long)r.dp_count,
+                       (unsigned long long)r.jumps, ck.path.c_str());
+                return 0;
+            }
             printf("  NOT FOUND within cap (jumps=%llu, %.1fs). Try more threads/seed or larger cap.\n",
                    (unsigned long long)r.jumps, r.seconds);
             return 1;

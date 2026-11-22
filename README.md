@@ -45,8 +45,28 @@ solve só exercitam ≤48 bits (um único limb); este fecha o restante. `ctest` 
 | Fase 2: 1 thread, plain | 15,15 s | — |
 | Fase 3a: 4 threads, plain | 7,89 s | 1,9× |
 | Fase 3b: 4 threads + simetria | **1,85 s** | **~8×** |
-| 4 | Dispatcher + front-end de volante (`--first-allow` → sub-intervalos) | ⬜ |
-| 5 | Checkpoint/resume da tabela de DP | ⬜ |
+| 4 | Dispatcher + front-end de volante (`--first-allow` → sub-intervalos) | ✅ **feito** |
+| 5 | Checkpoint/resume da tabela de DP | ✅ **feito** (`test_ckpt`, 14/14) |
+
+### Fase 5 — checkpoint/resume (à prova de reboot)
+
+Corridas longas agora sobrevivem a pausa/reboot. O que persiste é a **tabela de pontos
+distinguíveis** (o progresso acumulado) + contador de saltos + config, em formato binário
+com **escrita atômica** (`tmp`+`fsync`+`rename`, modo `0600`) e **digest SHA-256** no fim
+(detecta corrupção/adulteração). Em `--resume`, recarrega a tabela e a mesma tabela de
+saltos (via seed salvo) e continua com um **salt de sessão novo** (caminhadas inéditas) até
+a colisão. `Ctrl+C` grava um snapshot final e sai.
+
+```bash
+# grava progresso a cada 30s
+./build/excalibur --puzzle 71 --pubkey <PUB> --address <ADDR> --threads 3 \
+    --checkpoint p71.ckpt --checkpoint-interval 30
+# retoma de onde parou (mesmo após reboot)
+./build/excalibur --puzzle 71 --pubkey <PUB> --address <ADDR> --threads 3 --resume p71.ckpt
+```
+
+> Checkpoint vale no modo simetria (padrão). O arquivo guarda o escalar/valores em claro
+> — mantenha-o fora do controle de versão (já ignorado via `*.ckpt` não versionado).
 
 ## Build & teste
 

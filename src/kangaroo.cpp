@@ -6,6 +6,7 @@
 //                are correct (time, not integer width, is the only remaining limit).
 #include "kangaroo.h"
 #include "scalar.h"
+#include "checkpoint.h"
 #include <vector>
 #include <map>
 #include <array>
@@ -110,7 +111,7 @@ Result solve(const Point& target, int range, uint64_t seed, int threads) {
 // ---------------------------------------------------------------------------
 // Kangaroo WITH +-P symmetry (negation map) + fruitless-cycle escape
 // ---------------------------------------------------------------------------
-Result solve_sym(const Point& target, int range, uint64_t seed, int threads) {
+Result solve_sym(const Point& target, int range, uint64_t seed, int threads, CkptOpts* ck) {
     Result R;
     if (range < 2 || range > 160) return R;
     if (threads < 1) threads = 1;
@@ -120,20 +121,68 @@ Result solve_sym(const Point& target, int range, uint64_t seed, int threads) {
     const int      JMP  = 256, Mloc = std::max(64, 1024 / threads);
     int dp = half - 12; if (dp < 1) dp = 1; if (dp > 24) dp = 24;
     const uint64_t dpmask = (1ull << dp) - 1;
-    const uint64_t maxjumps = cap_jumps(half);
+    const uint64_t maxjumps = (ck && ck->max_jumps) ? ck->max_jumps : cap_jumps(half);
+    const uint64_t salt     = ck ? ck->session_salt : 0;
     const U256     N2 = sc::pow2(range - 1);
     const Point    target_c = ec::point_add(target, negp(ec::mul_g(N2)));   // center to [-N2,N2)
 
+    // Phase 5: resume loads the DP table; the jump table must match the one that built
+    // those DPs, so on a valid resume we reuse the stored seed for the jumps.
+    Snapshot snap; bool resumed = false; uint64_t jseed = seed;
+    if (ck && ck->resume && !ck->path.empty()) {
+        if (ckpt_load(ck->path, snap) == 0 && snap.range == range && snap.sym == 1 &&
+            ec::fe_eq(snap.target.x, target.x) && ec::fe_eq(snap.target.y, target.y)) {
+            jseed = snap.seed; resumed = true;
+        }
+    }
+
     std::vector<U256>  jdist(JMP);
     std::vector<Point> jpt(JMP), njpt(JMP);
-    { std::mt19937_64 rng(seed ^ 0xBADC0FFEE0DDF00DULL);
+    { std::mt19937_64 rng(jseed ^ 0xBADC0FFEE0DDF00DULL);
       for (int i = 0; i < JMP; ++i) { jdist[i] = rand_even_jump(rng, half); jpt[i] = ec::mul_g(jdist[i]); njpt[i] = negp(jpt[i]); } }
 
     std::map<Key, std::pair<uint8_t, Val>> table;
     std::mutex mtx; std::atomic<bool> found{false}; std::atomic<uint64_t> gjumps{0}; U256 gkey{{0,0,0,0}};
 
+    if (resumed) {
+        for (const auto& d : snap.dps)
+            table.emplace(Key{d.x.v[0], d.x.v[1], d.x.v[2], d.x.v[3]},
+                          std::make_pair(d.type, Val{d.val.v[0], d.val.v[1], d.val.v[2], d.val.v[3]}));
+        gjumps.store(snap.jumps, std::memory_order_relaxed);
+        if (ck) ck->loaded_dps = table.size();
+    }
+
+    // Periodic snapshot writer: copy the table under lock, then write atomically off-lock.
+    auto snapshot_now = [&]() {
+        Snapshot s; s.range = range; s.sym = 1; s.seed = jseed; s.target = target;
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            s.jumps = gjumps.load(std::memory_order_relaxed);
+            s.dps.reserve(table.size());
+            for (const auto& kv : table) {
+                DP d; d.x = U256{{kv.first[0], kv.first[1], kv.first[2], kv.first[3]}};
+                d.type = kv.second.first;
+                d.val  = U256{{kv.second.second[0], kv.second.second[1], kv.second.second[2], kv.second.second[3]}};
+                s.dps.push_back(d);
+            }
+        }
+        ckpt_save(ck->path, s);
+    };
+    std::atomic<bool> writer_stop{false};
+    std::thread writer;
+    if (ck && !ck->path.empty() && ck->interval_sec > 0) {
+        writer = std::thread([&]() {
+            while (!writer_stop.load(std::memory_order_relaxed)) {
+                for (int i = 0; i < ck->interval_sec * 10 && !writer_stop.load(std::memory_order_relaxed); ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                if (writer_stop.load(std::memory_order_relaxed)) break;
+                snapshot_now();
+            }
+        });
+    }
+
     auto worker = [&](int tid) {
-        std::mt19937_64 rng(seed + (uint64_t)tid * 0x9E3779B97F4A7C15ULL);
+        std::mt19937_64 rng(seed + (uint64_t)tid * 0x9E3779B97F4A7C15ULL + salt);
         const int T = Mloc / 2, M = 2 * T;
         std::vector<Point> pos(M), prev(M), prev2(M), Q(M), Rp(M);
         std::vector<U256>  dist(M, U256{{0,0,0,0}}), origin(M);
@@ -146,7 +195,8 @@ Result solve_sym(const Point& target, int range, uint64_t seed, int threads) {
         }
         for (int i = 0; i < M; ++i) { prev[i] = pos[i]; prev2[i] = pos[i]; }
         uint64_t local = 0;
-        while (!found.load(std::memory_order_relaxed) && gjumps.load(std::memory_order_relaxed) < maxjumps) {
+        while (!found.load(std::memory_order_relaxed) && gjumps.load(std::memory_order_relaxed) < maxjumps
+               && (!ck || !ck->stop || !ck->stop->load(std::memory_order_relaxed))) {
             for (int i = 0; i < M; ++i) {
                 uint32_t base = (uint32_t)(pos[i].x.v[0] % JMP);
                 if (ec::fe_eq(pos[i].x, prev2[i].x)) base = (base + 1) % JMP;   // escape 2-cycle
@@ -188,6 +238,9 @@ Result solve_sym(const Point& target, int range, uint64_t seed, int threads) {
     std::vector<std::thread> pool;
     for (int t = 0; t < threads; ++t) pool.emplace_back(worker, t);
     for (auto& th : pool) th.join();
+    writer_stop.store(true, std::memory_order_relaxed);
+    if (writer.joinable()) writer.join();
+    if (ck && !ck->path.empty()) snapshot_now();   // final durable snapshot
     auto t1 = std::chrono::high_resolution_clock::now();
     R.seconds = std::chrono::duration<double>(t1 - t0).count();
     R.found = found.load(); R.key = gkey; R.jumps = gjumps.load(); R.dp_count = table.size();

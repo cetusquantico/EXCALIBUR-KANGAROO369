@@ -4,5 +4,7 @@ build*/
 *.log
 *.lock
 *.tmp
+*.ckpt
+*.ckpt.tmp
 __pycache__/
 .venv/

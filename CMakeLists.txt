@@ -11,7 +11,7 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -funroll-loops")
 
 find_package(Threads REQUIRED)
 
-add_library(kangaroo_ec STATIC src/ec.cpp src/kangaroo.cpp src/hash.cpp)
+add_library(kangaroo_ec STATIC src/ec.cpp src/kangaroo.cpp src/hash.cpp src/checkpoint.cpp)
 target_include_directories(kangaroo_ec PUBLIC src)
 target_link_libraries(kangaroo_ec PUBLIC Threads::Threads)
 
@@ -37,6 +37,9 @@ configure_file(${CMAKE_SOURCE_DIR}/tests/puzzles.csv ${CMAKE_BINARY_DIR}/puzzles
 add_executable(test_wide tests/test_wide.cpp)
 target_link_libraries(test_wide kangaroo_ec)
 
+add_executable(test_ckpt tests/test_ckpt.cpp)
+target_link_libraries(test_ckpt kangaroo_ec)
+
 enable_testing()
 add_test(NAME ec_vectors COMMAND test_ec)
 add_test(NAME batch_correctness COMMAND bench_batch)
@@ -44,3 +47,4 @@ add_test(NAME kangaroo_solve COMMAND test_kangaroo)
 add_test(NAME kangaroo_symmetry COMMAND test_sym)
 add_test(NAME real_puzzles COMMAND test_real)
 add_test(NAME wide_160bit COMMAND test_wide)
+add_test(NAME checkpoint_resume COMMAND test_ckpt)
