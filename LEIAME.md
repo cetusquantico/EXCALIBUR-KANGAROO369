@@ -153,6 +153,14 @@ discreto em intervalo. Use apenas em chaves suas ou em alvos publicados para ser
 resolvidos. Arquivos de checkpoint guardam escalares em claro — mantenha-os privados. Ver
 [SECURITY.md](SECURITY.md).
 
+## Apoie
+
+Trabalho de tempo livre, bancado por mim. O próximo passo grande — a versão GPU do
+kangaroo — precisa de hardware. Se isto te for útil e quiser ajudar, doações em Bitcoin são
+bem-vindas, sem promessa de retorno:
+
+`bc1qhsq406jt6ghkzmhpnqe4r2s639t6mtrhj6zx03`
+
 ## Licença
 
 [MIT](LICENSE).

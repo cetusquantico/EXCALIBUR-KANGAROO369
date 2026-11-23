@@ -149,6 +149,14 @@ discrete-logarithm algorithms. Use it only on keys you own or on targets publish
 solved. Checkpoint files contain scalars in clear — keep them private. See
 [SECURITY.md](SECURITY.md).
 
+## Support
+
+Self-funded, spare-time work. The next big step — a GPU port of the kangaroo — needs
+hardware. If this is useful to you and you'd like to help, Bitcoin donations are welcome,
+with no promise of anything in return:
+
+`bc1qhsq406jt6ghkzmhpnqe4r2s639t6mtrhj6zx03`
+
 ## License
 
 [MIT](LICENSE).
