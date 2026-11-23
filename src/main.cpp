@@ -15,11 +15,42 @@
 #include <csignal>
 #include <atomic>
 #include <chrono>
+#include <unistd.h>
 
 static ec::Point negp(const ec::Point& p) { return ec::Point{p.x, ec::fe_neg(p.y), p.inf}; }
 
 static std::atomic<bool> g_stop{false};
 static void on_sigint(int) { g_stop.store(true); }
+
+// Locate an external brute engine: next to this executable first, then on PATH.
+// Returns "" when not found (the caller reports how to provide it).
+static std::string find_engine(const std::string& name) {
+    char self[4096];
+    const ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    if (n > 0) {
+        self[n] = '\0';
+        const std::string exe(self);
+        const size_t slash = exe.rfind('/');
+        if (slash != std::string::npos) {
+            const std::string cand = exe.substr(0, slash + 1) + name;
+            if (access(cand.c_str(), X_OK) == 0) return cand;
+        }
+    }
+    if (const char* path = getenv("PATH")) {
+        const std::string p(path);
+        for (size_t start = 0; start <= p.size();) {
+            size_t end = p.find(':', start);
+            if (end == std::string::npos) end = p.size();
+            const std::string dir = p.substr(start, end - start);
+            if (!dir.empty()) {
+                const std::string cand = dir + "/" + name;
+                if (access(cand.c_str(), X_OK) == 0) return cand;
+            }
+            start = end + 1;
+        }
+    }
+    return "";
+}
 
 static void usage() {
     printf(
@@ -43,7 +74,9 @@ static void usage() {
 "  --first-allow .. --allow ..   (exlottery volante; ignored by kh71)\n"
 "  --mode .. --found .. --threads ..\n"
 "  --brute-args \"..\"            raw flags appended verbatim (e.g. kh71 --fixed on ..)\n"
-"  --brute-bin PATH  exlottery path   --kh71-bin PATH  kh71 path\n\n"
+"  --brute-bin PATH  exlottery path   --kh71-bin PATH  kh71 path\n"
+"                  (default: looked up next to this binary, then on PATH;\n"
+"                   the brute engines are separate tools, not part of this repo)\n\n"
 "General:\n"
 "  --dry-run       show the dispatch decision/plan, do not run\n"
 "  -h, --help\n");
@@ -53,8 +86,7 @@ int main(int argc, char** argv) {
     int puzzle = 0, threads = 4, range = 0;
     uint64_t seed = 0x1234567;
     bool dry = false, sym = true;
-    std::string pubkey, address, brute_bin = "/root/EXCALIBUR-LOTTERY369/build-opt/exlottery";
-    std::string kh71_bin = "/root/excalibur369/build/kh71";
+    std::string pubkey, address, brute_bin, kh71_bin;   // empty = auto-locate (find_engine)
     std::string engine = "exlottery", brute_args;
     std::string first_allow, allow, mode, found_file;
     std::string ckpt_path, resume_path; int ckpt_interval = 30;
@@ -201,8 +233,12 @@ int main(int argc, char** argv) {
         if (engine != "kh71" && engine != "exlottery") {
             fprintf(stderr, "unknown --engine '%s' (use exlottery | kh71)\n", engine.c_str()); return 2;
         }
-        const std::string bin = is_kh71 ? kh71_bin : brute_bin;
-        std::string cmd = bin + " --puzzle " + std::to_string(puzzle) + " --address " + address;
+        const char* ename = is_kh71 ? "kh71" : "exlottery";
+        std::string bin = is_kh71 ? kh71_bin : brute_bin;
+        if (bin.empty()) bin = find_engine(ename);
+        const bool have_bin = !bin.empty() && access(bin.c_str(), X_OK) == 0;
+        std::string cmd = "'" + (bin.empty() ? std::string(ename) : bin) + "' --puzzle "
+                        + std::to_string(puzzle) + " --address " + address;
 
         if (is_kh71) {
             // kh71: base key hunter. Volante allow-lists are exlottery-only.
@@ -223,12 +259,13 @@ int main(int argc, char** argv) {
         if (!brute_args.empty()) cmd += " " + brute_args;
 
         printf("[dispatch] no public key -> BRUTE force (%s)\n", is_kh71 ? "kh71 / base key hunter" : "exlottery / volante");
-        printf("  binary : %s\n", bin.c_str());
+        printf("  binary : %s\n", have_bin ? bin.c_str() : "(not found)");
         printf("  command: %s\n", cmd.c_str());
+        if (!have_bin)
+            fprintf(stderr, "  engine '%s' not found: put it next to excalibur or on PATH, or pass %s PATH\n",
+                    ename, is_kh71 ? "--kh71-bin" : "--brute-bin");
         if (dry) { printf("  (dry-run) not executed.\n"); return 0; }
-        FILE* t = fopen(bin.c_str(), "rb");
-        if (!t) { fprintf(stderr, "  engine binary not found; use --brute-bin / --kh71-bin PATH\n"); return 2; }
-        fclose(t);
+        if (!have_bin) return 2;
         return system(cmd.c_str());
     }
 

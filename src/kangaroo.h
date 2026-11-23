@@ -1,4 +1,4 @@
-// EXCALIBUR-KANGAROO369 — Pollard's Kangaroo solver (CPU, single-thread, Phase 2)
+// EXCALIBUR-KANGAROO369 — Pollard's Kangaroo solver (CPU, multithreaded)
 // Solves k from P = k*G, with k in [0, 2^range), using tame/wild herds + DP.
 #pragma once
 #include "ec.h"

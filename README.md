@@ -1,166 +1,152 @@
 # EXCALIBUR-KANGAROO369
 
-Solver de ECDLP (Pollard's Kangaroo) para secp256k1 — o **terceiro** projeto da
-família, complementar ao EXCALIBUR-LOTTERY369 (brute/volante). Alvo: puzzles de
-Bitcoin **com chave pública exposta**, onde o Kangaroo resolve o log discreto em
-`≈ K·√W` passos (`K≈1,15` com simetria), em vez de forçar bruta `2^N`.
+*[Versão em português: LEIAME.md](LEIAME.md)*
 
-> Projeto de estudo/engenharia. Veja o design completo em
-> `../EXCALIBUR-LOTTERY369/docs/KANGAROO_DESIGN.md` (análise volante × kangaroo).
-> **Clean-room:** matemática EC reimplementada das fórmulas padrão, sem código GPL.
+A clean-room **Pollard's kangaroo** solver for the secp256k1 discrete logarithm in an
+interval, written from scratch in C++17. It targets the public **Bitcoin puzzle
+challenge** in the case where a puzzle's **public key is exposed**: the kangaroo then
+recovers the private key in about `K·√W` group operations instead of brute-forcing all
+`W` keys of the interval.
 
-## Estado atual
+It is a CPU reference implementation — correct, tested and documented — meant to be the
+base for a future GPU port, not a speed record.
 
-| Fase | Descrição | Status |
-|---|---|---|
-| **0** | Matemática EC em CPU (`EcInt`, add/double afim, `MulModP` com `2^256 mod p`, `InvModP` Fermat, `MultiplyG`, compress/decompress) | ✅ **feito, 10/10 testes** |
-| **1** | Inversão em lote (Montgomery) + `point_add_batch` | ✅ **feito, 64× — ~4M saltos/s/thread (~16M em 4 threads)** |
-| **2** | Kangaroo 2-manadas (vOW, starts espalhados) + DP + recuperação | ✅ **feito — resolve 32/40/48 bits; K→3,35 no 48; 48 bits em ~15s/1 thread** |
-| **3a** | Multithread (tabela de DP compartilhada entre workers) | ✅ **feito — 48 bits em ~7,9s/4 threads (~1,9×); 11 M saltos/s agregado** |
-| **3b** | Simetria `±P` (negação) + escape de *fruitless cycles* | ✅ **feito — K=1,03 no 48 bits; 2,95× menos saltos; chave correta** |
+> **Clean-room:** the elliptic-curve arithmetic is implemented from the standard
+> formulas; no GPL code was copied (in particular, none from RCKangaroo).
 
-> **3b (simetria `±P`) — implementado em `solve_sym`:** passo de negação bem-definido
-> nas classes `{Q,−Q}` (`step(Q)=Q+sinal(y)·s·G`, `step(−Q)=−step(Q)`); intervalo
-> centralizado em `[−N/2,N/2)`; distância **sinalizada**; recuperação testa os dois
-> candidatos `k'=val_T−val_W` e `k'=−val_T−val_W`; 2-ciclos detectados (ponto == 2
-> passos atrás) e escapados com salto determinístico por `x`. O `solve` original (sem
-> simetria) foi **mantido intacto** para comparação. Resultado medido: K≈1,0–1,8
-> (vs ~2–3,7 plain), no alvo SOTA (RCKangaroo K=1,15).
->
-> ⚠️ **Medido só até 48 bits.** Acima de ~52 bits esse desenho travava (caminhadas presas
-> em laços de auto-interseção) — **corrigido na Fase 6** (ver abaixo).
+## Result on real data
 
-### Alcance (256-bit scalar tracking)
-Distâncias/expoentes são rastreados em **inteiro de 256 bits** (`src/scalar.h`), então o
-solver é **correto de 2 a 160 bits** — o limite restante é só **tempo** (hardware), não
-largura de inteiro. É a *reference implementation* de CPU pronta pra espelhar num kernel
-CUDA. Tempo é `≈ K·√(2^range)`; só vale a pena em CPU moderna/múltipla até ~70 bits.
+Puzzle **68** (already solved publicly) recovered from its exposed public key, through
+the CLI, with checkpointing enabled:
 
-**Prova dos 65–160 bits (`test_wide`):** 31 verificações multi-limb — ops de 256 bits
-(carry/borrow/sinal entre os 4 limbs), `mul_g` de 96 e 160 bits conferido contra uma
-implementação secp256k1 **independente** (Python), e a aritmética de recuperação da chave
-acima de 2⁶⁴ (caminho plano e simetria centrada com valor negativo). Os demais testes do
-solve só exercitam ≤48 bits (um único limb); este fecha o restante. `ctest` → 6/6 verde.
-
-### Resumo de desempenho (48 bits, i5-3470)
-| Config | Tempo | Ganho acumulado |
-|---|---|---|
-| Fase 2: 1 thread, plain | 15,15 s | — |
-| Fase 3a: 4 threads, plain | 7,89 s | 1,9× |
-| Fase 3b: 4 threads + simetria | **1,85 s** | **~8×** |
-| 4 | Dispatcher + front-end de volante (`--first-allow` → sub-intervalos) | ✅ **feito** |
-| 5 | Checkpoint/resume da tabela de DP | ✅ **feito** (`test_ckpt`, 14/14) |
-| 6 | Simetria refeita como Gaudry–Schost (a 3b travava >52 bits) | ✅ **feito — 52 a 60 bits resolvem; `symmetry_54bit` no ctest** |
-
-### Fase 5 — checkpoint/resume (à prova de reboot)
-
-Corridas longas agora sobrevivem a pausa/reboot. O que persiste é a **tabela de pontos
-distinguíveis** (o progresso acumulado) + contador de saltos + config, em formato binário
-com **escrita atômica** (`tmp`+`fsync`+`rename`, modo `0600`) e **digest SHA-256** no fim
-(detecta corrupção/adulteração). Em `--resume`, recarrega a tabela e a mesma tabela de
-saltos (via seed salvo) e continua com um **salt de sessão novo** (caminhadas inéditas) até
-a colisão. `Ctrl+C` grava um snapshot final e sai.
-
-```bash
-# grava progresso a cada 30s
-./build/excalibur --puzzle 71 --pubkey <PUB> --address <ADDR> --threads 3 \
-    --checkpoint p71.ckpt --checkpoint-interval 30
-# retoma de onde parou (mesmo após reboot)
-./build/excalibur --puzzle 71 --pubkey <PUB> --address <ADDR> --threads 3 --resume p71.ckpt
+```
+private (hex)     : ...0bebb3940cd0fc1491   (matches the published solution)
+matches --address : YES
+jumps=2.04e10  K=1.68  threads=2  time=2996s       (Intel i5-3470, ~50 min)
 ```
 
-> Checkpoint vale no modo simetria (padrão). O arquivo guarda o escalar/valores em claro
-> — mantenha-o fora do controle de versão (já ignorado via `*.ckpt` não versionado).
+## Features
 
-### Fase 6 — simetria confiável em qualquer range (Gaudry–Schost)
+- **secp256k1 from scratch:** field arithmetic, affine point addition/doubling, Fermat
+  inversion, scalar multiplication, point (de)compression — checked against the public
+  keys of the solved puzzles.
+- **Batch inversion** (Montgomery's trick) in the hot loop: one inversion per batch of
+  points, ~64× cheaper than independent additions; ~3.4 M jumps/s per core on an Ivy
+  Bridge i5.
+- **Two solvers:** a plain two-herd van Oorschot–Wiener kangaroo (`solve`) and the default
+  **±P negation-map** solver implemented as **Gaudry–Schost walks** (`solve_sym`).
+- **Multithreaded**, with a shared distinguished-point (DP) table.
+- **256-bit distance tracking**, so ranges from **2 to 160 bits** are handled correctly —
+  time, not integer width, is the only limit.
+- **Checkpoint / resume** of the DP table: atomic write (`tmp` + `fsync` + `rename`, mode
+  `0600`), trailing SHA-256 digest, final snapshot on `Ctrl+C`.
+- **Unified CLI** (`excalibur`): prints the key in hex, as a compressed WIF and as the
+  derived address, and verifies it against `--address`.
 
-**Bug encontrado:** a simetria da Fase 3b só funcionava até ~52 bits. Escolher o sinal do
-salto pela paridade de y torna o passo uma função da classe `{P,−P}` — mas transforma o
-canguru num **passeio aleatório 1-D simétrico** em |dlog|. Esse passeio é *recorrente*:
-volta a pontos **exatos** depois de ~σ^(2/3) passos (σ ≈ tamanho do salto), fechando
-laços longos que re-batem DPs já conhecidos para sempre; e esse tempo cresce mais devagar
-que o intervalo entre DPs (2^dp), então quanto maior o range, pior. Medido no 54 bits:
-mais *re-hits* da própria manada do que DPs novos, **zero** colisões tame↔wild, e nenhuma
-solução nem com 16×√W. É o que fez a corrida de 71 bits passar a noite com só 28 DPs.
+## Why the negation map needed Gaudry–Schost walks
 
-**Correção — o jeito padrão de usar o mapa de negação num intervalo (Gaudry–Schost):**
-1. depois de **cada** DP a caminhada recomeça num ponto aleatório uniforme da região da
-   sua manada — um "teleporte" `t·G` pré-computado somado no próprio lote (custa uma
-   adição, nenhuma multiplicação escalar);
-2. trilha `2^dp` bem abaixo do tempo de auto-interseção (~1% das trilhas fecham laço);
-3. ciclos de 2 e 4 escapados por um salto determinístico e invariante à classe, de uma
-   tabela separada de saltos maiores (o escape não consegue reentrar no ciclo);
-4. *backstop*: caminhada sem DP por `8·2^dp` passos também teleporta.
+The first symmetric version chose the jump sign from the parity of `y`. That makes each
+step a function of the class `{P, −P}`, as the negation map requires — but it also turns
+the kangaroo into a **symmetric one-dimensional random walk** in `|dlog|`. Such a walk over
+a finite set of jumps is recurrent: after roughly `σ^(2/3)` steps (`σ` ≈ jump size) it
+returns to an *exact* earlier point and closes a long loop that keeps re-hitting known
+distinguished points. That time grows more slowly than the spacing between distinguished
+points (`2^dp`), so the larger the range, the worse it got.
 
-| range | Fase 3b | Fase 6 | K | re-hits | tempo (2 threads) |
+Measured at 54 bits with instrumentation: more same-herd re-hits than new DPs, **zero**
+tame/wild collisions, and no solution even after `16·√W` jumps.
+
+The fix uses the negation map the standard way for an interval:
+
+1. after **every** distinguished point a walk restarts at a fresh, uniformly random point
+   of its herd's region — a precomputed random "teleport" `t·G` folded into the next batch
+   addition, so a restart costs one batched addition and no scalar multiplication;
+2. the trail length `2^dp` is kept well below the self-intersection time (about 1% of
+   trails close a loop);
+3. 2- and 4-cycles are escaped with a deterministic, class-invariant jump taken from a
+   separate table of larger distances, so the escape cannot fall back into the cycle;
+4. as a backstop, a walk that goes `8·2^dp` steps without a DP is teleported as well.
+
+| range (bits) | first symmetric version | Gaudry–Schost | K | re-hits | time (2 threads) |
 |---|---|---|---|---|---|
-| 52 | instável (K até 7) | ✅ chave correta | 1,99 | 1 | 20 s |
-| 54 | ❌ nem com 16×√W | ✅ chave correta | 1,91 | 3 | 38 s |
-| 56 | ❌ | ✅ chave correta | 1,22 | 0 | 49 s |
-| 58 | ❌ | ✅ chave correta | 3,95 | 7 | 312 s |
-| 60 | ❌ | ✅ chave correta | 1,41 | 3 | 224 s |
+| 52 | unstable (K up to 7) | ✅ correct key | 1.99 | 1 | 20 s |
+| 54 | ❌ not even at 16·√W | ✅ correct key | 1.91 | 3 | 38 s |
+| 56 | ❌ | ✅ correct key | 1.22 | 0 | 49 s |
+| 58 | ❌ | ✅ correct key | 3.95 | 7 | 312 s |
+| 60 | ❌ | ✅ correct key | 1.41 | 3 | 224 s |
+| 67 (puzzle 68) | — | ✅ correct key | 1.68 | — | ~50 min |
 
-K médio medido ~2 (corridas únicas têm variância alta) — hoje a simetria empata com o
-modo plano em saltos, mas é a única com checkpoint/resume; aproximar do K≈1,36 teórico do
-Gaudry–Schost com negação é ajuste fino das regiões (trabalho futuro). O teste
-`symmetry_54bit` (ctest) resolve o caso de 54 bits que a caminhada antiga nunca resolvia
-e falha se a assinatura da armadilha (re-hits) voltar.
+The measured mean is K ≈ 2 (single runs vary a lot). Today the symmetric solver ties the
+plain one on jumps, but it is the one with checkpoint/resume; getting closer to the
+theoretical ~1.36 of Gaudry–Schost with the negation map is a matter of tuning the
+regions (future work). The `symmetry_54bit` test guards against the regression.
 
-Checkpoints agora são **versão 2**: DPs da caminhada antiga nunca colidem com a nova, então
-arquivos v1 são recusados — e o `--resume` avisa logo no início se não conseguir carregar.
+## Build and test
 
-## Build & teste
+Requires a C++17 compiler (g++ or clang++), CMake ≥ 3.10 and pthreads — no other
+dependencies.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j4
-./build/test_ec        # ou: ctest --test-dir build
+ctest --test-dir build --output-on-failure
 ```
 
-O teste confere `mul_g(k)` contra as pubkeys conhecidas dos puzzles 95–135 e
-descomprime a pubkey do 140. Se passar, todo o stack de corpo+curva está correto.
+The Release build uses `-march=native`, so the binary is tuned for (and only guaranteed
+to run on) the machine that built it.
 
-**Validação com dados reais (`test_real` + `tests/puzzles.csv`):** o fixture tem os 83
-puzzles resolvidos (1–135) com priv/endereço/pubkey. O teste (a) confere
-`mul_g(priv)==pubkey` em TODAS as linhas e (b) roda o kangaroo com simetria nos puzzles
-reais 40/44/48 a partir das pubkeys reais, recuperando as chaves privadas genuínas.
-Fonte: `hex_puzzle_resolvido.md`. Família: **excalibur369** (key hunter base, `kh71`) →
-**EXCALIBUR-LOTTERY369** (volante) → **EXCALIBUR-KANGAROO369** (este).
+| test | what it checks |
+|---|---|
+| `ec_vectors` | curve arithmetic; `mul_g(k)` against the public keys of puzzles 95–135; decompression |
+| `batch_correctness` | batched additions equal independent additions |
+| `kangaroo_solve` | plain kangaroo on synthetic ranges |
+| `kangaroo_symmetry` | plain vs. symmetric solver at 40/44/48 bits |
+| `real_puzzles` | every row of `tests/puzzles.csv` (`mul_g(priv) == pubkey`, address), then solves real puzzles 40/44/48 from their public keys |
+| `wide_160bit` | multi-limb arithmetic and key recovery above 2^64, up to 160 bits |
+| `checkpoint_resume` | save/load round-trip, tamper detection, pause → resume → correct key |
+| `symmetry_54bit` | solves a 54-bit case the first symmetric version never could, and fails if the trap signature (re-hits) comes back |
 
-## CLI unificado (`excalibur`) — dispatcher
+`tests/puzzles.csv` lists the publicly **solved** puzzles (their keys are already public)
+and is used as known-answer data.
 
-Front-end único que roteia pelo tipo de alvo:
+## Usage
 
 ```bash
-# pubkey exposta -> KANGAROO nativo (intervalo exato do puzzle [2^(N-1),2^N))
-./build/excalibur --puzzle 48 --pubkey 0291bee5...12debb --address 1DFYha... --threads 4
-#   -> acha a chave, deriva WIF + endereço e AUTO-VERIFICA (matches --address: YES)
+# exposed public key -> kangaroo over the exact puzzle interval [2^(N-1), 2^N)
+./build/excalibur --puzzle 68 --pubkey <COMPRESSED_PUBKEY_HEX> --address <P2PKH_ADDRESS> \
+    --threads 2 --checkpoint p68.ckpt --checkpoint-interval 30
 
-# só endereço (sem pubkey) -> BRUTE. Dois engines:
-./build/excalibur --puzzle 71 --address 1AVJ... --first-allow 4a,5a --allow 00,0c   # exlottery (default)
-./build/excalibur --puzzle 71 --address 1AVJ... --engine kh71 --mode reverse        # kh71 (base)
-./build/excalibur --puzzle 71 --address 1AVJ... --engine kh71 --brute-args "--fixed on --fixed-count 3"
+# resume after a pause or a reboot
+./build/excalibur --puzzle 68 --pubkey <...> --address <...> --threads 2 --resume p68.ckpt
+
+# only print the plan and a time estimate
+./build/excalibur --puzzle 68 --pubkey <...> --address <...> --dry-run
 ```
 
-Roteia os **três** tools: pubkey→kangaroo nativo; endereço+`--engine exlottery`→volante
-(`--first-allow`/`--allow`); endereço+`--engine kh71`→key hunter base (`--fixed*` via
-`--brute-args`). `--found` vira `--output` no kh71. Paths overrideáveis com `--brute-bin`
-/ `--kh71-bin`. Outras opções: `--range N`, `--threads`, `--seed`, `--no-sym`, `--dry-run`.
-O kangaroo aceita **ranges de 2 a 160 bits** (distâncias em inteiro de 256 bits). Acima de
-~64 bits imprime uma **estimativa de tempo honesta** e avisa que é inviável neste i5 —
-pensado pra CPU mais rápida ou futura GPU (Ctrl-C a qualquer hora). Saída do kangaroo:
-chave hex/decimal, **WIF comprimida**, endereço derivado e verificação contra `--address`.
+Other options: `--range N` (custom range in bits), `--threads N`, `--seed N` and
+`--no-sym` (plain kangaroo; checkpointing is not available in that mode). The CLI prints
+an honest time estimate and warns when a run is out of reach for the machine.
 
-## Decisões de design (resumo)
+**Address-only targets.** Without a public key the kangaroo cannot be used, so the CLI
+hands the target to an external brute-force engine (`exlottery` by default, or
+`--engine kh71`). Those engines are **separate tools and are not part of this
+repository**; the CLI looks for them next to its own binary, then on `PATH`, or takes
+`--brute-bin` / `--kh71-bin`. `--first-allow`, `--allow`, `--mode`, `--found` and
+`--brute-args` are passed through to the engine.
 
-- **Kangaroo opera no nível do ponto EC** (alvo = pubkey). **Não** precisa de
-  SHA256/RIPEMD160 no núcleo — compara pontos, não hash160.
-- `--first-allow` (bits altos) **transfere** para kangaroo como `-start/-range`
-  (sub-intervalos). `--allow` dos bytes do meio **não** transfere (erro de
-  categoria — kangaroo não enumera candidatos). Detalhes no doc de design.
-- **Hardware:** sem GPU NVIDIA aqui (i5-3470 + Intel iGPU). Este projeto valida a
-  matemática/algoritmo em tamanho de brinquedo; puzzle real exige GPU no futuro.
+## Limits
 
-## Licença
-A definir. Como NÃO copiamos código do RCKangaroo (GPLv3), ficamos livres para
-escolher a licença — ver nota no doc de design.
+This runs on a CPU. The puzzles that remain unsolved with an exposed public key are far
+beyond CPU reach, and even a single GPU competes against large pools. The value here is a
+correct, tested and documented reference that a GPU kernel can mirror.
+
+## Intended use
+
+For the intentionally public Bitcoin puzzle challenge and for studying interval
+discrete-logarithm algorithms. Use it only on keys you own or on targets published to be
+solved. Checkpoint files contain scalars in clear — keep them private. See
+[SECURITY.md](SECURITY.md).
+
+## License
+
+[MIT](LICENSE).
