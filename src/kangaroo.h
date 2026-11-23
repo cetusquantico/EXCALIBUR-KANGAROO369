@@ -28,6 +28,8 @@ struct Result {
     double    seconds = 0;
     double    K = 0;            // empirical constant: jumps / sqrt(2^range)
     int       threads = 1;
+    // diagnostics (solve_sym): cycle escapes, stall restarts, tame/wild DP matches, same-herd re-hits
+    uint64_t  escapes = 0, restarts = 0, collisions = 0, rehits = 0;
 };
 
 // Solve the interval DLP. `range` must be 2..160. `seed` makes runs reproducible.
@@ -35,8 +37,10 @@ struct Result {
 Result solve(const ec::Point& target, int range, uint64_t seed = 0x1234567,
              int threads = 4);
 
-// Same, but with the +-P negation-map SYMMETRY (Phase 3b): ~1.8x fewer ops (K->~1.15),
-// at the cost of fruitless-cycle handling. Interval is centered to [-N/2, N/2).
+// Same, but with the +-P negation-map SYMMETRY. Phase 6: implemented as Gaudry–Schost
+// walks (restart after every DP, 2/4-cycle escape, in-batch teleports); measured
+// K ~1.2-2.0 at 40-56 bits and reliable at every range (the Phase 3b walk stalled
+// above ~52 bits). Interval is centered to [-N/2, N/2).
 // Phase 5: pass `ck` to checkpoint the DP table periodically and/or resume from it.
 Result solve_sym(const ec::Point& target, int range, uint64_t seed = 0x1234567,
                  int threads = 4, CkptOpts* ck = nullptr);

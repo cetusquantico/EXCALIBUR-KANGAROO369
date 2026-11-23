@@ -10,7 +10,9 @@
 namespace kang {
 
 static const char  MAGIC[4] = {'E','X','K','5'};
-static const uint32_t VERSION = 1;
+// v2 = Phase 6 walk (Gaudry–Schost). DPs from a v1 file were produced by a different
+// walk function and can never collide with v2 trails, so v1 files are rejected.
+static const uint32_t VERSION = 2;
 
 // ---- little-endian byte helpers ----
 static void put_u64(std::vector<uint8_t>& b, uint64_t v) {

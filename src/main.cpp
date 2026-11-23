@@ -5,6 +5,7 @@
 #include "kangaroo.h"
 #include "hash.h"
 #include "scalar.h"
+#include "checkpoint.h"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -110,15 +111,16 @@ int main(int argc, char** argv) {
         printf("  puzzle=%d  effective range=%d bits  interval=[2^%d, 2^%d)  threads=%d\n",
                puzzle, reff, puzzle ? puzzle-1 : 0, puzzle ? puzzle : reff, threads);
         {   // honest ETA / feasibility note
-            double est = std::pow(2.0, reff / 2.0) * (sym ? 1.1 : 2.0);   // ~jumps
-            double secs = est / 1.0e7;                                    // ~1e7 jumps/s (4 threads)
+            double est = std::pow(2.0, reff / 2.0) * (sym ? 2.0 : 2.3);   // ~jumps (measured mean K)
+            int tc = threads < 1 ? 1 : (threads > 4 ? 4 : threads);       // i5-3470: 4 cores
+            double secs = est / (3.2e6 * tc);                             // ~3.2M jumps/s per core
             const char* unit = "s"; double v = secs;
             if (v > 3.15e7) { v = secs / 3.15e7; unit = "anos"; }
             else if (v > 86400) { v = secs / 86400; unit = "dias"; }
             else if (v > 3600) { v = secs / 3600; unit = "h"; }
             else if (v > 60) { v = secs / 60; unit = "min"; }
             printf("  estimativa: ~%.1e saltos  ~%.1f %s neste i5", est, v, unit);
-            if (reff > 64) printf("  <-- inviavel nesta CPU; feito pra CPU mais rapida / futura GPU (Ctrl-C a qualquer hora)");
+            if (secs > 30.0 * 86400) printf("  <-- inviavel nesta CPU; feito pra CPU mais rapida / futura GPU (Ctrl-C a qualquer hora)");
             printf("\n");
         }
         // Phase 5: checkpoint/resume (symmetry mode only)
@@ -138,6 +140,19 @@ int main(int argc, char** argv) {
                 signal(SIGINT, on_sigint);
                 printf("  checkpoint: %s%s (every %ds)\n", ck.path.c_str(),
                        ck.resume ? " [resuming]" : "", ck.interval_sec);
+                if (ck.resume) {   // say up front whether the resume will actually take
+                    kang::Snapshot s; int rc = kang::ckpt_load(ck.path, s);
+                    if (rc != 0)
+                        printf("  note: cannot load %s (%s) - starting FRESH\n", ck.path.c_str(),
+                               rc == -1 ? "missing/unreadable" : rc == -3 ? "corrupt: digest mismatch"
+                                        : "bad format or older walk version");
+                    else if (s.range != reff)
+                        printf("  note: %s is for range %d, not %d - starting FRESH\n",
+                               ck.path.c_str(), s.range, reff);
+                    else
+                        printf("  resume: %zu DPs, %llu jumps already done\n",
+                               s.dps.size(), (unsigned long long)s.jumps);
+                }
             }
         }
         if (dry) { printf("  (dry-run) would solve now.\n"); return 0; }

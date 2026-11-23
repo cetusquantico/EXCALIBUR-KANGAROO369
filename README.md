@@ -26,6 +26,9 @@ Bitcoin **com chave pública exposta**, onde o Kangaroo resolve o log discreto e
 > passos atrás) e escapados com salto determinístico por `x`. O `solve` original (sem
 > simetria) foi **mantido intacto** para comparação. Resultado medido: K≈1,0–1,8
 > (vs ~2–3,7 plain), no alvo SOTA (RCKangaroo K=1,15).
+>
+> ⚠️ **Medido só até 48 bits.** Acima de ~52 bits esse desenho travava (caminhadas presas
+> em laços de auto-interseção) — **corrigido na Fase 6** (ver abaixo).
 
 ### Alcance (256-bit scalar tracking)
 Distâncias/expoentes são rastreados em **inteiro de 256 bits** (`src/scalar.h`), então o
@@ -47,6 +50,7 @@ solve só exercitam ≤48 bits (um único limb); este fecha o restante. `ctest` 
 | Fase 3b: 4 threads + simetria | **1,85 s** | **~8×** |
 | 4 | Dispatcher + front-end de volante (`--first-allow` → sub-intervalos) | ✅ **feito** |
 | 5 | Checkpoint/resume da tabela de DP | ✅ **feito** (`test_ckpt`, 14/14) |
+| 6 | Simetria refeita como Gaudry–Schost (a 3b travava >52 bits) | ✅ **feito — 52 a 60 bits resolvem; `symmetry_54bit` no ctest** |
 
 ### Fase 5 — checkpoint/resume (à prova de reboot)
 
@@ -67,6 +71,43 @@ a colisão. `Ctrl+C` grava um snapshot final e sai.
 
 > Checkpoint vale no modo simetria (padrão). O arquivo guarda o escalar/valores em claro
 > — mantenha-o fora do controle de versão (já ignorado via `*.ckpt` não versionado).
+
+### Fase 6 — simetria confiável em qualquer range (Gaudry–Schost)
+
+**Bug encontrado:** a simetria da Fase 3b só funcionava até ~52 bits. Escolher o sinal do
+salto pela paridade de y torna o passo uma função da classe `{P,−P}` — mas transforma o
+canguru num **passeio aleatório 1-D simétrico** em |dlog|. Esse passeio é *recorrente*:
+volta a pontos **exatos** depois de ~σ^(2/3) passos (σ ≈ tamanho do salto), fechando
+laços longos que re-batem DPs já conhecidos para sempre; e esse tempo cresce mais devagar
+que o intervalo entre DPs (2^dp), então quanto maior o range, pior. Medido no 54 bits:
+mais *re-hits* da própria manada do que DPs novos, **zero** colisões tame↔wild, e nenhuma
+solução nem com 16×√W. É o que fez a corrida de 71 bits passar a noite com só 28 DPs.
+
+**Correção — o jeito padrão de usar o mapa de negação num intervalo (Gaudry–Schost):**
+1. depois de **cada** DP a caminhada recomeça num ponto aleatório uniforme da região da
+   sua manada — um "teleporte" `t·G` pré-computado somado no próprio lote (custa uma
+   adição, nenhuma multiplicação escalar);
+2. trilha `2^dp` bem abaixo do tempo de auto-interseção (~1% das trilhas fecham laço);
+3. ciclos de 2 e 4 escapados por um salto determinístico e invariante à classe, de uma
+   tabela separada de saltos maiores (o escape não consegue reentrar no ciclo);
+4. *backstop*: caminhada sem DP por `8·2^dp` passos também teleporta.
+
+| range | Fase 3b | Fase 6 | K | re-hits | tempo (2 threads) |
+|---|---|---|---|---|---|
+| 52 | instável (K até 7) | ✅ chave correta | 1,99 | 1 | 20 s |
+| 54 | ❌ nem com 16×√W | ✅ chave correta | 1,91 | 3 | 38 s |
+| 56 | ❌ | ✅ chave correta | 1,22 | 0 | 49 s |
+| 58 | ❌ | ✅ chave correta | 3,95 | 7 | 312 s |
+| 60 | ❌ | ✅ chave correta | 1,41 | 3 | 224 s |
+
+K médio medido ~2 (corridas únicas têm variância alta) — hoje a simetria empata com o
+modo plano em saltos, mas é a única com checkpoint/resume; aproximar do K≈1,36 teórico do
+Gaudry–Schost com negação é ajuste fino das regiões (trabalho futuro). O teste
+`symmetry_54bit` (ctest) resolve o caso de 54 bits que a caminhada antiga nunca resolvia
+e falha se a assinatura da armadilha (re-hits) voltar.
+
+Checkpoints agora são **versão 2**: DPs da caminhada antiga nunca colidem com a nova, então
+arquivos v1 são recusados — e o `--resume` avisa logo no início se não conseguir carregar.
 
 ## Build & teste
 
