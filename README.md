@@ -132,7 +132,9 @@ hands the target to an external brute-force engine (`exlottery` by default, or
 `--engine kh71`). Those engines are **separate tools and are not part of this
 repository**; the CLI looks for them next to its own binary, then on `PATH`, or takes
 `--brute-bin` / `--kh71-bin`. `--first-allow`, `--allow`, `--mode`, `--found` and
-`--brute-args` are passed through to the engine.
+`--brute-args` are passed through to the engine. For `exlottery`, the dispatcher also
+exposes `--volante NAME` (a panel-saved wheel, used instead of `--puzzle`),
+`--stop-on-hit`, `--quiet` and `--output human|kv` as first-class flags.
 
 ## Limits
 

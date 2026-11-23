@@ -72,6 +72,10 @@ static void usage() {
 "Brute engine (with --address):\n"
 "  --engine NAME   exlottery (default, volante) | kh71 (base key hunter)\n"
 "  --first-allow .. --allow ..   (exlottery volante; ignored by kh71)\n"
+"  --volante NAME  exlottery: use a panel-saved volante (puzzle + both lists)\n"
+"  --stop-on-hit   exlottery: stop at the first confirmed key\n"
+"  --quiet         exlottery: hide the plan and progress\n"
+"  --output human|kv   exlottery: result format (kv for scripts)\n"
 "  --mode .. --found .. --threads ..\n"
 "  --brute-args \"..\"            raw flags appended verbatim (e.g. kh71 --fixed on ..)\n"
 "  --brute-bin PATH  exlottery path   --kh71-bin PATH  kh71 path\n"
@@ -89,6 +93,7 @@ int main(int argc, char** argv) {
     std::string pubkey, address, brute_bin, kh71_bin;   // empty = auto-locate (find_engine)
     std::string engine = "exlottery", brute_args;
     std::string first_allow, allow, mode, found_file;
+    std::string volante, out_format; bool stop_on_hit = false, quiet = false;   // exlottery
     std::string ckpt_path, resume_path; int ckpt_interval = 30;
 
     auto need = [&](int& i) -> std::string {
@@ -117,6 +122,10 @@ int main(int argc, char** argv) {
         else if (a == "--kh71-bin") kh71_bin = need(i);
         else if (a == "--engine") engine = need(i);
         else if (a == "--brute-args") brute_args = need(i);
+        else if (a == "--volante") volante = need(i);
+        else if (a == "--stop-on-hit") stop_on_hit = true;
+        else if (a == "--quiet") quiet = true;
+        else if (a == "--output") out_format = need(i);
         else { fprintf(stderr, "unknown arg: %s\n", a.c_str()); usage(); return 2; }
     }
 
@@ -228,19 +237,22 @@ int main(int argc, char** argv) {
 
     // ---------------- BRUTE path (only an address) ----------------
     if (!address.empty()) {
-        if (puzzle <= 0) { fprintf(stderr, "need --puzzle N for brute\n"); return 2; }
         bool is_kh71 = (engine == "kh71");
         if (engine != "kh71" && engine != "exlottery") {
             fprintf(stderr, "unknown --engine '%s' (use exlottery | kh71)\n", engine.c_str()); return 2;
+        }
+        if (!volante.empty() && is_kh71) { fprintf(stderr, "--volante is exlottery-only\n"); return 2; }
+        if (puzzle <= 0 && volante.empty()) {
+            fprintf(stderr, "need --puzzle N (or --volante NAME for exlottery) for brute\n"); return 2;
         }
         const char* ename = is_kh71 ? "kh71" : "exlottery";
         std::string bin = is_kh71 ? kh71_bin : brute_bin;
         if (bin.empty()) bin = find_engine(ename);
         const bool have_bin = !bin.empty() && access(bin.c_str(), X_OK) == 0;
-        std::string cmd = "'" + (bin.empty() ? std::string(ename) : bin) + "' --puzzle "
-                        + std::to_string(puzzle) + " --address " + address;
+        std::string cmd = "'" + (bin.empty() ? std::string(ename) : bin) + "'";
 
         if (is_kh71) {
+            cmd += " --puzzle " + std::to_string(puzzle) + " --address " + address;
             // kh71: base key hunter. Volante allow-lists are exlottery-only.
             if (!first_allow.empty() || !allow.empty())
                 fprintf(stderr, "  note: --first-allow/--allow are exlottery-only; "
@@ -248,13 +260,23 @@ int main(int argc, char** argv) {
             if (!mode.empty())       cmd += " --mode " + mode;
             cmd += " --threads " + std::to_string(threads);
             if (!found_file.empty()) cmd += " --output " + found_file;   // kh71 uses --output
+            if (stop_on_hit || quiet || !out_format.empty() || !volante.empty())
+                fprintf(stderr, "  note: --volante/--stop-on-hit/--quiet/--output are exlottery-only (ignored for kh71)\n");
         } else {
-            cmd += " --search";
-            if (!first_allow.empty()) cmd += " --first-allow " + first_allow;
-            if (!allow.empty())       cmd += " --allow " + allow;
+            // exlottery: a saved volante supplies the puzzle + both byte lists; otherwise --puzzle.
+            if (!volante.empty()) cmd += " --volante " + volante;
+            else {
+                cmd += " --puzzle " + std::to_string(puzzle);
+                if (!first_allow.empty()) cmd += " --first-allow " + first_allow;
+                if (!allow.empty())       cmd += " --allow " + allow;
+            }
+            cmd += " --search --address " + address;
             if (!mode.empty())        cmd += " --mode " + mode;
             cmd += " --threads " + std::to_string(threads);
             if (!found_file.empty())  cmd += " --found " + found_file;
+            if (stop_on_hit)          cmd += " --stop-on-hit";
+            if (quiet)                cmd += " --quiet";
+            if (!out_format.empty())  cmd += " --output " + out_format;
         }
         if (!brute_args.empty()) cmd += " " + brute_args;
 
